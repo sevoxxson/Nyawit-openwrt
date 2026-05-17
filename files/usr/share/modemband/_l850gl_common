@@ -1,0 +1,83 @@
+# Shared logic for all Intel/Fibocom L850-GL / L860-GL USB compositions.
+# Sourced by the per-VID:PID stubs in this directory.
+
+# Probe ttyACM2 → ttyACM0 → ttyACM1 to find the AT control port. Different
+# L850-GL USB compositions move the AT port around; trying a few keeps us
+# generic.
+_l850_pick_device() {
+    local d
+    # Fibocom L850-GL appears under at least two USB compositions:
+    #   * Intel-branded (8087:*)   → exposes /dev/ttyACM0..3 for AT
+    #   * Fibocom-branded (2cb7:*) → exposes /dev/ttyUSB0..3  for AT
+    # Probe both families. The first port that answers AT+GMM with an L850
+    # / L860 string wins.
+    for d in /dev/ttyACM2 /dev/ttyACM0 /dev/ttyACM1 /dev/ttyACM3 \
+             /dev/ttyUSB2 /dev/ttyUSB0 /dev/ttyUSB1 /dev/ttyUSB3; do
+        [ -c "$d" ] || continue
+        if sms_tool -d "$d" at "at+gmm" 2>/dev/null | grep -qE "L8[56]0"; then
+            echo "$d"
+            return 0
+        fi
+    done
+    # Fall back to a sensible default if probing fails (some serial drivers
+    # only respond on the *second* AT probe after a cold boot).
+    for d in /dev/ttyACM2 /dev/ttyUSB2 /dev/ttyACM0 /dev/ttyUSB0; do
+        [ -c "$d" ] && { echo "$d"; return 0; }
+    done
+    echo "/dev/ttyACM2"
+}
+
+_DEVICE="$(_l850_pick_device)"
+
+getinfo() {
+    O=$(sms_tool -d "$_DEVICE" at "at+gmm")
+    _NAME="Fibocom $(echo "$O" | awk -F, '{print $2}')"
+    echo "$_NAME"
+}
+
+getsupportedbands() {
+    O=$(sms_tool -d "$_DEVICE" at "at+gmm")
+    if echo "$O" | grep -q "L850"; then
+        _DEFAULT_LTE_BANDS="1 2 3 4 5 7 8 11 12 13 17 18 19 20 21 26 28 29 30 38 39 40 41 66"
+    fi
+    if echo "$O" | grep -q "L860"; then
+        _DEFAULT_LTE_BANDS="1 2 3 4 5 7 8 12 13 14 17 18 19 20 25 26 28 29 30 32 38 39 40 41 42 46 66"
+    fi
+    if echo "$O" | grep -q "L860-GL-16"; then
+        _DEFAULT_LTE_BANDS="1 2 3 4 5 7 8 12 13 14 17 18 19 20 25 26 28 29 30 32 34 38 39 40 41 42 43 46 48 66 71"
+    fi
+    echo "$_DEFAULT_LTE_BANDS"
+}
+
+getbands() {
+    O=$(sms_tool -d "$_DEVICE" at "at+xact?")
+    BANDS=$(echo "$O" | awk -F: '/^\+XACT:/{gsub(","," ");print $2}')
+    for BAND in $BANDS; do
+        if [ $BAND -gt 100 ] && [ $BAND -lt 200 ]; then
+            echo -n "$((BAND - 100)) "
+        fi
+    done
+    echo ""
+}
+
+setbands() {
+    BANDS="$1"
+    T=""
+    if [ "$BANDS" = "default" ]; then
+        T="0"
+    else
+        for BAND in $BANDS; do
+            case $BAND in
+                ''|*[!0-9]*) continue ;;
+            esac
+            [ -n "$T" ] && T="${T},"
+            T="${T}$((BAND + 100))"
+        done
+    fi
+
+    if [ -n "$T" ]; then
+        O=$(sms_tool -d "$_DEVICE" at "at+xact?")
+        MODE=$(echo "$O" | awk -F[:,] '{print $2}' | xargs)
+        sms_tool -d "$_DEVICE" at "at+xact=$MODE,,,$T"
+    fi
+}

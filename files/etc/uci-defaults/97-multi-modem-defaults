@@ -1,0 +1,83 @@
+#!/bin/sh
+# Multi-modem (Fibocom L850-GL + Foxconn T99W175) first-boot defaults.
+#
+# Runs BEFORE 99-0xygen-firstboot so QModem / lpac config is in place
+# when the other firstboot script queries UCI. Idempotent: every set is
+# guarded by `uci -q get` so re-running (e.g. sysupgrade keeping settings)
+# is a no-op for already-configured options.
+#
+# What it does:
+#   1. Disables any leftover ModemManager service so it cannot fight
+#      QModem for /dev/cdc-wdm0. The packages list intentionally never
+#      installs modemmanager, but if a previous firmware revision left
+#      service symlinks behind we drop them defensively.
+#   2. Ensures /etc/config/lpac-esim has the patched-lpac defaults
+#      shared by L850-GL and T99W175: mbim backend, mbim_proxy=1,
+#      mbim_skip_slot_mapping=1, custom_isd_r_aid (HYFE / XL),
+#      at_device=/dev/ttyUSB2, modem_iface=1_1.
+
+LOG_TAG='multi-modem-defaults'
+log() { logger -t "${LOG_TAG}" -- "$*"; }
+
+ensure_lpac_option() {
+	option="$1"
+	value="$2"
+
+	if ! uci -q get "lpac-esim.main.${option}" >/dev/null 2>&1; then
+		uci -q set "lpac-esim.main.${option}=${value}"
+	fi
+}
+
+log "initializing multi-modem (QModem + lpac) defaults"
+
+# ---- 1. Stop+disable any leftover ModemManager service ------------------
+for svc in modemmanager ModemManager; do
+	if [ -x "/etc/init.d/${svc}" ]; then
+		"/etc/init.d/${svc}" stop >/dev/null 2>&1 || true
+		"/etc/init.d/${svc}" disable >/dev/null 2>&1 || true
+	fi
+done
+killall ModemManager mmcli 2>/dev/null || true
+rm -f /etc/rc.d/S*modemmanager /etc/rc.d/K*modemmanager \
+      /etc/rc.d/S*ModemManager /etc/rc.d/K*ModemManager 2>/dev/null || true
+log "ModemManager fallback disabled; QModem owns /dev/cdc-wdm0"
+
+# ---- 2. Patched-lpac defaults (L850-GL + T99W175) ----------------------
+uci -q get lpac-esim.main >/dev/null 2>&1 || uci -q set lpac-esim.main='lpac-esim'
+
+ensure_lpac_option apdu_backend 'mbim'
+ensure_lpac_option http_backend 'curl'
+ensure_lpac_option qmi_device '/dev/cdc-wdm0'
+ensure_lpac_option qmi_sim_slot '1'
+ensure_lpac_option sim_slot '1'
+ensure_lpac_option at_device '/dev/ttyUSB2'
+ensure_lpac_option mbim_device '/dev/cdc-wdm0'
+ensure_lpac_option mbim_proxy '1'
+ensure_lpac_option mbim_skip_slot_mapping '1'
+ensure_lpac_option custom_isd_r_aid 'A0000005591010FFFFFFFF8900000100'
+ensure_lpac_option reboot_method 'script'
+ensure_lpac_option modem_iface '1_1'
+ensure_lpac_option apdu_debug '0'
+ensure_lpac_option http_debug '0'
+ensure_lpac_option at_debug '0'
+
+uci -q commit lpac-esim
+log "lpac defaults: backend=mbim proxy=1 skip_slot=1 at=/dev/ttyUSB2 iface=1_1 ISD-R=A0..0100"
+
+# ---- 3. QModem services (if installed via prebuilt qmodem packages) ---
+for svc in qmodem_init at_daemon; do
+	if [ -x "/etc/init.d/${svc}" ]; then
+		"/etc/init.d/${svc}" enable >/dev/null 2>&1 || true
+		log "service ${svc} enabled"
+	fi
+done
+
+# ---- 4. mount-debugfs (needed by modemband + qmodem helpers) ----------
+if [ -x /etc/init.d/mount-debugfs ]; then
+	/etc/init.d/mount-debugfs enable >/dev/null 2>&1 || true
+	/etc/init.d/mount-debugfs start  >/dev/null 2>&1 || true
+	log "debugfs mount service enabled"
+fi
+
+log "multi-modem first-boot setup done"
+exit 0

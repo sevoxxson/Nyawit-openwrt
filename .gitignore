@@ -1,0 +1,20 @@
+# Build artifacts produced locally by scripts/build-*.sh
+build/
+dist/
+sources/
+custom-feed/
+
+# OpenWrt SDK / ImageBuilder tarballs that may be cached next to the repo
+openwrt-sdk-*
+openwrt-imagebuilder-*
+*.tar.zst
+*.tar.gz
+# ... but DO track the lpac-l850gl source overlay; it is checked in
+# intentionally (see packages/lpac-overlay/ and scripts/build-packages.sh).
+!packages/lpac-overlay/*.tar.gz
+
+# Editor noise
+.vscode/
+.idea/
+*.swp
+.DS_Store

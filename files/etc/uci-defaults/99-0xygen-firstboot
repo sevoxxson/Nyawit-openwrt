@@ -1,0 +1,154 @@
+#!/bin/sh
+# 0xygen-Linksys EA6350v3 first-boot setup.
+#
+# Runs once after a fresh sysupgrade (`sysupgrade -n` or "Keep settings"
+# unchecked in LuCI). OpenWrt removes this file once it has returned 0,
+# so the script must keep going past minor failures rather than aborting.
+#
+# What it does:
+#   1. Force-enables both WiFi radios (the shipped /etc/config/wireless
+#      already carries the correct SSID/password; this is just a belt-
+#      and-braces step in case the file was overridden).
+#   2. Cleans up any leftover ModemManager-backed `modem` interface from
+#      previous firmware revisions — this build uses QModem as the
+#      primary modem manager (see 97-multi-modem-defaults), so the WAN
+#      uplink is driven by QModem / wwan or by uqmi over MBIM instead.
+#   3. Switches the LuCI default theme to Material if installed.
+#   4. Reloads wifi + network so the changes take effect immediately,
+#      without waiting for the next boot.
+
+LOG_TAG='0xygen-firstboot'
+log() { logger -t "${LOG_TAG}" -- "$*"; }
+
+log "starting first-boot configuration"
+
+# ---- Constants -----------------------------------------------------------
+WIFI_PASS='1sampai10'
+SSID_24='0x'
+SSID_5='0x⁵'
+WIFI_COUNTRY='ID'
+
+# ---- 1. WiFi: hard-set the configuration we want on every radio/iface ----
+# We assume the shipped /etc/config/wireless overlay defines radio0 (2.4 GHz)
+# and radio1 (5 GHz) with default_radio0 / default_radio1 child interfaces.
+# Re-apply everything here so this works even if the user wiped the overlay
+# or OpenWrt regenerated wireless config from scratch on first boot.
+for radio in radio0 radio1; do
+    uci -q set "wireless.${radio}=wifi-device"
+    uci -q set "wireless.${radio}.disabled=0"
+    uci -q set "wireless.${radio}.country=${WIFI_COUNTRY}"
+done
+
+# Make sure the radio<->band mapping matches what we baked into the overlay.
+uci -q set 'wireless.radio0.band=2g'
+uci -q set 'wireless.radio0.htmode=HT20'
+uci -q set 'wireless.radio0.channel=auto'
+uci -q set 'wireless.radio1.band=5g'
+uci -q set 'wireless.radio1.htmode=VHT80'
+uci -q set 'wireless.radio1.channel=auto'
+
+uci -q set 'wireless.default_radio0=wifi-iface'
+uci -q set 'wireless.default_radio0.device=radio0'
+uci -q set 'wireless.default_radio0.network=lan'
+uci -q set 'wireless.default_radio0.mode=ap'
+uci -q set "wireless.default_radio0.ssid=${SSID_24}"
+uci -q set 'wireless.default_radio0.encryption=psk2'
+uci -q set "wireless.default_radio0.key=${WIFI_PASS}"
+uci -q set 'wireless.default_radio0.disabled=0'
+
+uci -q set 'wireless.default_radio1=wifi-iface'
+uci -q set 'wireless.default_radio1.device=radio1'
+uci -q set 'wireless.default_radio1.network=lan'
+uci -q set 'wireless.default_radio1.mode=ap'
+uci -q set "wireless.default_radio1.ssid=${SSID_5}"
+uci -q set 'wireless.default_radio1.encryption=psk2'
+uci -q set "wireless.default_radio1.key=${WIFI_PASS}"
+uci -q set 'wireless.default_radio1.disabled=0'
+
+uci -q commit wireless
+log "wifi configured (2.4G='${SSID_24}', 5G='${SSID_5}')"
+
+# ---- 2. Drop legacy ModemManager-backed `modem` interface ---------------
+# Previous firmware revisions auto-created network.modem with
+# `proto='modemmanager'`. This build does not install ModemManager
+# (QModem owns /dev/cdc-wdm0; see 97-multi-modem-defaults). Leaving the
+# old interface in /etc/config/network would make netifd spin trying to
+# bring up a non-existent ModemManager proto and pollute the firewall.
+LEGACY_PROTO="$(uci -q get network.modem.proto 2>/dev/null || true)"
+if [ "${LEGACY_PROTO}" = "modemmanager" ]; then
+    # Detach from any firewall zone that referenced it, then drop the
+    # interface entirely.
+    WAN_ZONE_LEGACY="$(uci -q show firewall 2>/dev/null \
+        | sed -n "s/^firewall\\.\\([^.]*\\)\\.name='wan'\$/\\1/p" \
+        | head -n1)"
+    if [ -n "${WAN_ZONE_LEGACY}" ]; then
+        uci -q del_list "firewall.${WAN_ZONE_LEGACY}.network=modem" 2>/dev/null
+        uci -q commit firewall
+    fi
+    uci -q delete network.modem 2>/dev/null
+    uci -q commit network
+    log "removed legacy modemmanager-backed 'modem' interface"
+fi
+
+# ---- 4. LuCI theme: prefer Material when installed ----------------------
+# luci-theme-argon was removed in favour of luci-theme-material; this
+# block also clears any stale `mediaurlbase=/luci-static/argon` left
+# behind in /etc/config/luci from a previous firmware image so the
+# webserver doesn't 404 trying to load the old theme assets.
+if [ -d /www/luci-static/material ]; then
+    uci -q set luci.main=core
+    uci -q set luci.main.mediaurlbase='/luci-static/material'
+    uci -q commit luci
+    log "luci theme set to material"
+elif [ "$(uci -q get luci.main.mediaurlbase)" = "/luci-static/argon" ]; then
+    # Argon no longer ships; fall back to whatever LuCI defaults to.
+    uci -q delete luci.main.mediaurlbase
+    uci -q commit luci
+    log "cleared stale argon mediaurlbase"
+fi
+
+# ---- 5. Telegram bot defaults + init state ------------------------------
+uci -q get lpac-esim.main >/dev/null 2>&1 || uci -q set lpac-esim.main='lpac-esim'
+# Only initialize telegram_enabled on a truly empty UCI so a re-run of this
+# script (e.g. sysupgrade keeping settings, or someone executing it manually)
+# does not silently revert a user's "enabled" choice back to "0".
+uci -q get lpac-esim.main.telegram_enabled >/dev/null 2>&1 || \
+    uci -q set lpac-esim.main.telegram_enabled="${LPAC_ESIM_TELEGRAM_ENABLED:-0}"
+uci -q get lpac-esim.main.telegram_poll_interval >/dev/null 2>&1 || \
+    uci -q set lpac-esim.main.telegram_poll_interval='2'
+uci -q get lpac-esim.main.telegram_debug >/dev/null 2>&1 || \
+    uci -q set lpac-esim.main.telegram_debug='0'
+uci -q commit lpac-esim
+if [ -x /etc/init.d/esim-telegram-bot ]; then
+    /etc/init.d/esim-telegram-bot enable >/dev/null 2>&1 || true
+    log "telegram bot init enabled (starts only when configured)"
+fi
+
+# ---- 6. Enable + start mount-debugfs (modemband needs /sys/kernel/debug) ----
+# luci-app-modemband reads /sys/kernel/debug/usb/devices to detect the modem.
+# debugfs is not mounted by default in OpenWrt, so without this the L850-GL
+# (and any other supported modem) is reported as "No supported modem found".
+if [ -x /etc/init.d/mount-debugfs ]; then
+    /etc/init.d/mount-debugfs enable >/dev/null 2>&1 || true
+    /etc/init.d/mount-debugfs start  >/dev/null 2>&1 || true
+    log "mount-debugfs service enabled"
+fi
+
+# ---- 7. Drop stale LuCI caches so freshly-installed apps' menu entries / ----
+# Lua controller index() registrations are picked up on first request. Without
+# this, luci-app-lpac-manager's child API routes (connectivity, chip, ...) may
+# not be reachable on the very first boot because the indexcache was generated
+# before the package was installed.
+rm -f /tmp/luci-indexcache /tmp/luci-modulecache 2>/dev/null
+rm -rf /tmp/luci-modulecache/ 2>/dev/null
+/etc/init.d/rpcd restart >/dev/null 2>&1 || true
+log "luci index + module cache cleared"
+
+# ---- 8. Reload wifi + network so things come up without a reboot -------
+/sbin/wifi reload >/dev/null 2>&1 || /sbin/wifi up >/dev/null 2>&1 || true
+/etc/init.d/network reload >/dev/null 2>&1 || true
+/etc/init.d/firewall reload >/dev/null 2>&1 || true
+log "wifi + network reloaded"
+
+log "first-boot configuration done"
+exit 0
