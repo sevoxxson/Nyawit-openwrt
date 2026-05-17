@@ -1,0 +1,179 @@
+name: Build OpenWrt firmware (multi-device)
+
+on:
+  push:
+    branches:
+      - main
+      - 'devin/**'
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      device:
+        description: 'Device preset (fills target_path + profile + sdk_arch). Choose "custom" to specify the three fields yourself.'
+        required: true
+        default: 'linksys_ea6350v3'
+        type: choice
+        options:
+          - linksys_ea6350v3
+          - custom
+      openwrt_version:
+        description: 'OpenWrt release, e.g. 25.12.3 or 25.12.4. Use "latest" to auto-pick the newest stable release from downloads.openwrt.org.'
+        required: true
+        default: '25.12.3'
+        type: string
+      target_path:
+        description: 'ImageBuilder target_path (only used when device=custom). Example: ipq40xx/generic, ramips/mt7621, mediatek/filogic.'
+        required: false
+        default: 'ipq40xx/generic'
+        type: string
+      profile:
+        description: 'ImageBuilder profile name (only used when device=custom). Example: linksys_ea6350v3.'
+        required: false
+        default: 'linksys_ea6350v3'
+        type: string
+      sdk_arch:
+        description: 'SDK architecture tag used to fetch openwrt/sdk docker image for the Telegram bot cross-compile (only used when device=custom). Example: arm_cortex-a7_neon-vfpv4.'
+        required: false
+        default: 'arm_cortex-a7_neon-vfpv4'
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  DEFAULT_OPENWRT_VERSION: '25.12.3'
+  DEFAULT_DEVICE: 'linksys_ea6350v3'
+
+jobs:
+  build-firmware:
+    name: Build firmware image (ImageBuilder)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve build parameters
+        # User-controlled workflow_dispatch inputs are passed through env vars
+        # (and validated below) rather than interpolated into the run script
+        # so they cannot be used for shell injection.
+        env:
+          INPUT_DEVICE: ${{ github.event.inputs.device }}
+          INPUT_OPENWRT_VERSION: ${{ github.event.inputs.openwrt_version }}
+          INPUT_TARGET_PATH: ${{ github.event.inputs.target_path }}
+          INPUT_PROFILE: ${{ github.event.inputs.profile }}
+          INPUT_SDK_ARCH: ${{ github.event.inputs.sdk_arch }}
+        run: |
+          DEVICE="${INPUT_DEVICE:-${DEFAULT_DEVICE}}"
+          OPENWRT_VERSION="${INPUT_OPENWRT_VERSION:-${DEFAULT_OPENWRT_VERSION}}"
+
+          # Resolve the device preset to (TARGET_PATH, PROFILE, SDK_ARCH). For
+          # the `custom` choice we pull the three fields from workflow inputs.
+          case "${DEVICE}" in
+              linksys_ea6350v3)
+                  TARGET_PATH='ipq40xx/generic'
+                  PROFILE='linksys_ea6350v3'
+                  SDK_ARCH='arm_cortex-a7_neon-vfpv4'
+                  ;;
+              custom)
+                  TARGET_PATH="${INPUT_TARGET_PATH:-ipq40xx/generic}"
+                  PROFILE="${INPUT_PROFILE:-linksys_ea6350v3}"
+                  SDK_ARCH="${INPUT_SDK_ARCH:-arm_cortex-a7_neon-vfpv4}"
+                  ;;
+              *)
+                  echo "::error::unknown device preset: ${DEVICE}"; exit 1 ;;
+          esac
+
+          # Allow only characters that legitimately appear in OpenWrt version
+          # strings, target_path, profile and SDK architecture tags. Anything
+          # else is rejected. 'latest' is allowed for OPENWRT_VERSION and
+          # resolved below.
+          case "${OPENWRT_VERSION}" in
+              *[!A-Za-z0-9._-]*|'')
+                  echo "::error::invalid openwrt_version: ${OPENWRT_VERSION}"; exit 1 ;;
+          esac
+          case "${TARGET_PATH}" in
+              *[!A-Za-z0-9._/-]*|''|/*|*/)
+                  echo "::error::invalid target_path: ${TARGET_PATH}"; exit 1 ;;
+          esac
+          case "${PROFILE}" in
+              *[!A-Za-z0-9._-]*|'')
+                  echo "::error::invalid profile: ${PROFILE}"; exit 1 ;;
+          esac
+          case "${SDK_ARCH}" in
+              *[!A-Za-z0-9._-]*|'')
+                  echo "::error::invalid sdk_arch: ${SDK_ARCH}"; exit 1 ;;
+          esac
+
+          # Resolve 'latest' → newest stable release in the 25.12.x series
+          # (the only series for which ImageBuilders for ipq40xx/linksys_ea6350v3
+          # are currently published). The releases.json file is small (<10KB)
+          # and lists every published release directory under downloads.openwrt.org/releases.
+          if [ "${OPENWRT_VERSION}" = "latest" ]; then
+              echo "Resolving 'latest' against https://downloads.openwrt.org/.versions.json …"
+              RESOLVED=$(curl -sSfL --max-time 15 https://downloads.openwrt.org/.versions.json \
+                  | python3 -c 'import json,sys; d=json.load(sys.stdin); r=d.get("stable_version") or d.get("latest"); print(r)' \
+                  2>/dev/null || true)
+              if [ -z "${RESOLVED}" ]; then
+                  echo "::error::could not resolve 'latest' from .versions.json"; exit 1
+              fi
+              echo "Resolved 'latest' → ${RESOLVED}"
+              OPENWRT_VERSION="${RESOLVED}"
+              case "${OPENWRT_VERSION}" in
+                  *[!A-Za-z0-9._-]*|'')
+                      echo "::error::resolved version is invalid: ${OPENWRT_VERSION}"; exit 1 ;;
+              esac
+          fi
+
+          # Fail fast: HEAD the ImageBuilder URL we are about to use. This
+          # turns the common "typoed version / version not released yet"
+          # failure mode from a 5-minute build crash into a 5-second
+          # readable error at the top of the run log.
+          TARGET_SLUG="${TARGET_PATH//\//-}"
+          IMG_URL="https://downloads.openwrt.org/releases/${OPENWRT_VERSION}/targets/${TARGET_PATH}/openwrt-imagebuilder-${OPENWRT_VERSION}-${TARGET_SLUG}.Linux-x86_64.tar.zst"
+          echo "Pre-checking ImageBuilder availability: ${IMG_URL}"
+          if ! curl -sSfIL --max-time 15 "${IMG_URL}" >/dev/null 2>&1; then
+              echo "::error::ImageBuilder for ${OPENWRT_VERSION} (${TARGET_PATH}) is not published. Check https://downloads.openwrt.org/releases/ for a valid version."
+              exit 1
+          fi
+          echo "ImageBuilder URL is reachable."
+
+          {
+              echo "OPENWRT_VERSION=${OPENWRT_VERSION}"
+              echo "TARGET_PATH=${TARGET_PATH}"
+              echo "PROFILE=${PROFILE}"
+              echo "SDK_ARCH=${SDK_ARCH}"
+          } >> "$GITHUB_ENV"
+
+      - name: Install host tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+              zstd file curl python3-distutils-extra build-essential \
+              libncurses-dev gawk gettext unzip xsltproc rsync \
+              wget python3 python3-pyelftools
+
+      - name: Pull OpenWrt SDK for Telegram bot
+        run: docker pull "openwrt/sdk:${SDK_ARCH}-${OPENWRT_VERSION}"
+
+      - name: List prebuilt packages
+        run: ls -la packages/prebuilt/
+
+      - name: Build firmware image
+        env:
+          OPENWRT_VERSION: ${{ env.OPENWRT_VERSION }}
+          TARGET_PATH: ${{ env.TARGET_PATH }}
+          PROFILE: ${{ env.PROFILE }}
+          SDK_ARCH: ${{ env.SDK_ARCH }}
+        run: bash scripts/build-firmware.sh
+
+      - name: Show firmware artifacts
+        run: ls -la dist/firmware
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ env.PROFILE }}-${{ env.OPENWRT_VERSION }}
+          path: dist/firmware/**
+          if-no-files-found: error
+          retention-days: 30

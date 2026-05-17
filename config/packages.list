@@ -1,0 +1,111 @@
+# Package list installed into the OpenWrt firmware image. The same image
+# supports both the Fibocom L850-GL (mPCIe / M.2 internal) and the
+# Foxconn T99W175 (USB 05c6:90d5 / 05c6:9025) eSIM modems on the target
+# profiles handled by scripts/build-firmware.sh (default: linksys_ea6350v3
+# on ipq40xx-generic, arm_cortex-a7_neon-vfpv4).
+#
+# Lines starting with `#` and blank lines are ignored by the build script.
+# QModem packages (qmodem, luci-app-qmodem-next, sms-tool_q, tom_modem,
+# ubus-at-daemon, quectel-CM-5G-M, sms-forwarder-next) are produced by
+# scripts/build-packages.sh and copied in by scripts/build-firmware.sh as
+# prebuilt .apk files, so they are not listed here.
+
+# ---- Core LuCI ----
+luci
+luci-base
+luci-compat
+luci-lua-runtime
+luci-mod-network
+luci-mod-admin-full
+luci-mod-status
+luci-mod-system
+luci-ssl-openssl
+
+# ---- Themes ----
+luci-theme-material
+luci-theme-bootstrap
+
+# ---- Cellular stack (QModem-managed; ModemManager intentionally NOT installed)
+# ModemManager fights QModem for /dev/cdc-wdm0 + wwan0 and breaks lpac/MBIM,
+# so we explicitly never install modemmanager / luci-proto-modemmanager.
+libmbim
+mbim-utils
+libqmi
+uqmi
+usb-modeswitch
+usbutils
+comgt
+comgt-ncm
+picocom
+
+# ---- L850-GL + T99W175 kernel + USB drivers ----
+kmod-usb-net
+kmod-usb-net-cdc-ether
+kmod-usb-net-cdc-mbim
+kmod-usb-net-cdc-ncm
+kmod-usb-net-qmi-wwan
+kmod-usb-net-rndis
+kmod-usb-serial
+kmod-usb-serial-option
+kmod-usb-serial-wwan
+kmod-usb-serial-qualcomm
+kmod-usb-acm
+kmod-usb-wdm
+kmod-usb-uhci
+kmod-usb-ohci
+kmod-usb2
+kmod-usb3
+kmod-usb-storage
+kmod-mii
+
+# ---- Custom modem extras (4IceG / obsy, built from the extras feed) ----
+atinout
+luci-app-atinout
+modemband
+luci-app-modemband
+modemdata
+luci-app-modemdata
+
+# ---- eSIM stack (makungyu/0xygen-AIO: lpac LPA patch usable for both
+#      L850-GL removable eSIM and T99W175 internal eSIM, plus LuCI / CLI
+#      and HYFE trial helpers). The lpac Makefile is rewritten in the SDK
+#      job to drop the modemmanager build-dependency so MBIM remains free
+#      for QModem to dial on.
+lpac
+luci-app-lpac-manager
+0xygen-aio
+
+# ---- Utilities used by uci-defaults / runtime helpers ----
+jq
+# coreutils-timeout: defence-in-depth so any shell script (current or
+# future) can use the `timeout` binary. BusyBox in stock OpenWrt 25.12.x
+# ipq40xx builds does NOT include CONFIG_TIMEOUT=y, which used to
+# silently break api_connectivity ("ash: timeout: not found" -> exit 127
+# -> permanent "No internet connection detected" in luci-app-lpac-manager
+# even with working internet). The controller itself no longer requires
+# `timeout` but installing it costs ~5 KB and removes a sharp edge.
+coreutils-timeout
+coreutils-stat
+bc
+terminfo
+# libcurl + curl are rebuilt by the SDK job with IMAP/IMAPS/POP3/SMTP
+# enabled so that 0xygen-aio's HYFE OTP poller (`esim hyfetrial`) can talk
+# IMAP. The rebuilt .apk has a bumped PKG_RELEASE so it outranks the
+# upstream prebuilt libcurl when the ImageBuilder resolves dependencies.
+libcurl
+curl
+ca-bundle
+ca-certificates
+
+# ---- Recovery / convenience ----
+nano
+htop
+luci-app-firewall
+luci-app-opkg
+# Lightweight in-LuCI file manager (System -> File Browser).
+luci-app-filebrowser
+
+# ---- Explicitly NOT installed (kept here as documentation) ----
+# modemmanager            -> conflicts with QModem on /dev/cdc-wdm0 + MBIM
+# luci-proto-modemmanager -> not needed without modemmanager
+# sms-tool                -> replaced by sms-tool_q (Q-flavour built with QModem)

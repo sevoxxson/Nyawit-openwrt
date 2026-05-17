@@ -1,0 +1,2 @@
+# Fibocom L850-GL composition (USB 80870acf) — reuses shared L850-GL logic.
+. /usr/share/modemband/_l850gl_common

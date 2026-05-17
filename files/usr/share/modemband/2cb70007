@@ -1,0 +1,3 @@
+# Fibocom L850-GL with Fibocom-branded USB IDs (2cb7:0007) — reuses
+# shared L850-GL logic.
+. /usr/share/modemband/_l850gl_common
